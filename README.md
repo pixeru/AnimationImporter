@@ -2,6 +2,8 @@
 
 This Blender addon adds an N-panel tab named Animation Importer in the 3D View.
 
+Minimum Blender version: 4.0 or above.
+
 What it does:
 - Uses the selected armature as the target rig.
 - Loads animation from an FBX file.
