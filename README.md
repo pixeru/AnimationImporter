@@ -19,8 +19,11 @@ Usage:
 6. Click Load Animation.
 
 Video Docs:
-- Walkthrough recording:
-https://github.com/user-attachments/assets/647cb192-680b-4e01-8e2e-21a624168b9f
+- Walkthrough recording (https://github.com/user-attachments/assets/647cb192-680b-4e01-8e2e-21a624168b9f):
+
+<video controls width="960" src="https://github.com/user-attachments/assets/647cb192-680b-4e01-8e2e-21a624168b9f">
+	Your viewer does not support embedded video. Open the direct link below.
+</video>
 
 Notes:
 - This is intended for the same rig structure. It does not retarget between different skeletons.
