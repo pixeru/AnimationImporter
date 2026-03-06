@@ -18,6 +18,9 @@ Usage:
 5. Choose a source .fbx file.
 6. Click Load Animation.
 
+Video Docs:
+- Walkthrough recording: [docs/2026-03-06 14-51-18.mp4](docs/2026-03-06%2014-51-18.mp4)
+
 Notes:
 - This is intended for the same rig structure. It does not retarget between different skeletons.
 - The addon temporarily imports the FBX, grabs the action created by Blender's FBX importer, assigns it to your selected rig, then removes the imported FBX objects.
