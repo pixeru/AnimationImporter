@@ -9,11 +9,15 @@ bl_info = {
 }
 
 import os
+import re
 
 import bpy
 from bpy.props import StringProperty
 from bpy.types import Operator, Panel
 from bpy_extras.io_utils import ImportHelper
+
+
+_POSE_BONE_PATH_RE = re.compile(r'^pose\.bones\["(.+?)"\]\.(.+)$')
 
 
 def _selected_rig(context):
@@ -151,6 +155,67 @@ def _extract_imported_action_and_rig(new_objects, new_actions):
 	return None, None
 
 
+def _bone_name_from_data_path(data_path):
+	match = _POSE_BONE_PATH_RE.match(data_path)
+	if match is None:
+		return None, None
+	return match.group(1), match.group(2)
+
+
+def _default_transform_value(transform_name, array_index):
+	if transform_name in {'location', 'rotation_euler', 'rotation_axis_angle'}:
+		return 0.0
+	if transform_name == 'rotation_quaternion':
+		return 1.0 if array_index == 0 else 0.0
+	if transform_name == 'scale':
+		return 1.0
+	return None
+
+
+def _fcurve_has_motion(fcurve, transform_name):
+	default_value = _default_transform_value(transform_name, fcurve.array_index)
+	values = []
+
+	for keyframe_point in getattr(fcurve, 'keyframe_points', []):
+		values.append(round(keyframe_point.co[1], 6))
+
+	for sampled_point in getattr(fcurve, 'sampled_points', []):
+		values.append(round(sampled_point.co[1], 6))
+
+	if not values:
+		return True
+
+	if len(set(values)) > 1:
+		return True
+
+	if default_value is None:
+		return True
+
+	return abs(values[0] - default_value) > 0.0001
+
+
+def _animated_bone_names_from_action(action):
+	if action is None or not hasattr(action, 'fcurves'):
+		return []
+
+	animated_bones = set()
+	allowed_transforms = {
+		'location',
+		'rotation_euler',
+		'rotation_quaternion',
+		'rotation_axis_angle',
+	}
+
+	for fcurve in action.fcurves:
+		bone_name, property_name = _bone_name_from_data_path(fcurve.data_path)
+		if bone_name is None or property_name not in allowed_transforms:
+			continue
+		if _fcurve_has_motion(fcurve, property_name):
+			animated_bones.add(bone_name)
+
+	return sorted(animated_bones)
+
+
 def _bone_compatibility_text_from_names(target_rig, imported_bone_names):
 	if target_rig is None or imported_bone_names is None:
 		return "Compatibility: unavailable"
@@ -170,8 +235,12 @@ def _bone_compatibility_text(target_rig, source_rig):
 	if source_rig is None:
 		return "Compatibility: unavailable"
 
-	source_bone_names = [bone.name for bone in source_rig.data.bones]
-	return _bone_compatibility_text_from_names(target_rig, source_bone_names)
+	source_action = getattr(source_rig.animation_data, 'action', None) if source_rig.animation_data else None
+	if source_action is None:
+		return "Compatibility: no active action on comparison rig"
+
+	animated_bone_names = _animated_bone_names_from_action(source_action)
+	return _bone_compatibility_text_from_names(target_rig, animated_bone_names)
 
 
 def _remove_objects(objects):
@@ -227,9 +296,7 @@ def _import_fbx_animation(filepath):
 		_remove_unused_ids(bpy.data.collections, new_collections)
 		return None, None, 0
 
-	imported_bone_names = None
-	if imported_rig is not None:
-		imported_bone_names = [bone.name for bone in imported_rig.data.bones]
+	animated_bone_names = _animated_bone_names_from_action(imported_action)
 
 	_remove_objects(new_objects)
 	_remove_unused_ids(bpy.data.armatures, new_armatures)
@@ -238,7 +305,7 @@ def _import_fbx_animation(filepath):
 	_remove_unused_ids(bpy.data.images, new_images)
 	_remove_unused_ids(bpy.data.collections, new_collections)
 
-	return imported_action, imported_bone_names, len(new_objects)
+	return imported_action, animated_bone_names, len(new_objects)
 
 
 class ANIMATIONIMPORTER_OT_pick_source_file(Operator, ImportHelper):
@@ -282,18 +349,14 @@ class ANIMATIONIMPORTER_OT_load_action(Operator):
 		_mode_to_object(context)
 
 		try:
-			imported_action, imported_bone_names, imported_object_count = _import_fbx_animation(filepath)
+			imported_action, _animated_bone_names, imported_object_count = _import_fbx_animation(filepath)
 		except RuntimeError as exc:
-			context.scene.animation_importer_compatibility = "Compatibility: import failed"
 			self.report({'ERROR'}, f"Failed to import FBX: {exc}")
 			return {'CANCELLED'}
 
 		if imported_action is None:
-			context.scene.animation_importer_compatibility = "Compatibility: no importable action found"
 			self.report({'ERROR'}, "The FBX did not create an importable action")
 			return {'CANCELLED'}
-
-		context.scene.animation_importer_compatibility = _bone_compatibility_text_from_names(rig_object, imported_bone_names)
 
 		filename_stem = os.path.splitext(os.path.basename(filepath))[0]
 		if imported_action.name in {'Armature', 'default', 'Take 001'}:
@@ -308,7 +371,50 @@ class ANIMATIONIMPORTER_OT_load_action(Operator):
 			context.scene.frame_start = int(frame_start)
 			context.scene.frame_end = int(frame_end)
 
-		self.report({'INFO'}, f"Loaded '{imported_action.name}' onto {rig_object.name} from FBX and removed {imported_object_count} temporary object(s). {context.scene.animation_importer_compatibility}")
+		self.report({'INFO'}, f"Loaded '{imported_action.name}' onto {rig_object.name} from FBX and removed {imported_object_count} temporary object(s)")
+		return {'FINISHED'}
+
+
+class ANIMATIONIMPORTER_OT_check_fbx_compatibility(Operator):
+	bl_idname = "animation_importer.check_fbx_compatibility"
+	bl_label = "Check FBX Compatibility"
+	bl_description = "Temporarily inspect the FBX and report compatibility using only animated bones"
+
+	@classmethod
+	def poll(cls, context):
+		target_rig = _selected_rig(context)
+		filepath = context.scene.animation_importer_source if context.scene else ""
+		return target_rig is not None and bool(filepath)
+
+	def execute(self, context):
+		target_rig = _selected_rig(context)
+		filepath = context.scene.animation_importer_source
+
+		if target_rig is None:
+			self.report({'ERROR'}, "Select one armature object as the target rig")
+			return {'CANCELLED'}
+
+		if not filepath or not os.path.isfile(filepath):
+			context.scene.animation_importer_compatibility = "Compatibility: choose a valid source .fbx file first"
+			self.report({'ERROR'}, "Choose a valid source .fbx file first")
+			return {'CANCELLED'}
+
+		_mode_to_object(context)
+
+		try:
+			_imported_action, animated_bone_names, _imported_object_count = _import_fbx_animation(filepath)
+		except RuntimeError as exc:
+			context.scene.animation_importer_compatibility = "Compatibility: FBX check failed"
+			self.report({'ERROR'}, f"Failed to inspect FBX: {exc}")
+			return {'CANCELLED'}
+
+		if animated_bone_names is None:
+			context.scene.animation_importer_compatibility = "Compatibility: no importable action found"
+			self.report({'ERROR'}, "The FBX did not create an importable action")
+			return {'CANCELLED'}
+
+		context.scene.animation_importer_compatibility = _bone_compatibility_text_from_names(target_rig, animated_bone_names)
+		self.report({'INFO'}, context.scene.animation_importer_compatibility)
 		return {'FINISHED'}
 
 
@@ -354,6 +460,10 @@ class ANIMATIONIMPORTER_PT_sidebar(Panel):
 		col.prop(scene, "animation_importer_source", text="")
 
 		col.separator()
+		check_fbx_row = col.row()
+		check_fbx_row.enabled = rig_object is not None and bool(scene.animation_importer_source)
+		check_fbx_row.operator("animation_importer.check_fbx_compatibility", icon='VIEWZOOM')
+
 		button_row = col.row()
 		button_row.enabled = rig_object is not None and bool(scene.animation_importer_source)
 		button_row.operator("animation_importer.load_action", icon='ACTION')
@@ -371,6 +481,7 @@ class ANIMATIONIMPORTER_PT_sidebar(Panel):
 			layout.label(text=f"Compare rig: {comparison_rig.name}", icon='BONE_DATA')
 
 		layout.label(text="The FBX is imported temporarily to extract its action.", icon='INFO')
+		layout.label(text="Compatibility only counts bones that are actually animated.", icon='INFO')
 		layout.label(text="To compare an open rig, select the target rig and one other armature.", icon='INFO')
 		layout.label(text="Imported action will appear in the Action Editor.", icon='INFO')
 		layout.label(text=scene.animation_importer_compatibility, icon='BONE_DATA')
@@ -379,6 +490,7 @@ class ANIMATIONIMPORTER_PT_sidebar(Panel):
 classes = (
 	ANIMATIONIMPORTER_OT_pick_source_file,
 	ANIMATIONIMPORTER_OT_load_action,
+	ANIMATIONIMPORTER_OT_check_fbx_compatibility,
 	ANIMATIONIMPORTER_OT_check_open_rig_compatibility,
 	ANIMATIONIMPORTER_PT_sidebar,
 )
