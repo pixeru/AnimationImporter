@@ -69,6 +69,48 @@ def _assign_action_to_rig(rig_object, action):
 			pass
 
 
+def _remove_action_fcurve(action, fcurve):
+	if hasattr(action, "fcurves"):
+		action.fcurves.remove(fcurve)
+		return
+
+	for layer in getattr(action, "layers", []):
+		for strip in getattr(layer, "strips", []):
+			channelbag = getattr(strip, "channelbag", None)
+			fcurves = getattr(channelbag, "fcurves", None)
+			if fcurves is None:
+				continue
+			for candidate in list(fcurves):
+				if candidate.as_pointer() == fcurve.as_pointer():
+					fcurves.remove(candidate)
+					return
+
+
+def _sanitize_action_for_same_rig(action):
+	if not hasattr(action, "fcurves"):
+		return
+
+	transform_paths = {
+		"location",
+		"rotation_euler",
+		"rotation_quaternion",
+		"rotation_axis_angle",
+		"scale",
+	}
+
+	for fcurve in list(action.fcurves):
+		data_path = fcurve.data_path
+
+		# Remove object-level transforms so the destination rig keeps its existing size and placement.
+		if data_path in transform_paths:
+			_remove_action_fcurve(action, fcurve)
+			continue
+
+		# Remove pose bone scale keys so only motion is transferred.
+		if data_path.startswith('pose.bones[') and data_path.endswith('.scale'):
+			_remove_action_fcurve(action, fcurve)
+
+
 def _mode_to_object(context):
 	if context.mode == 'OBJECT':
 		return
@@ -210,6 +252,7 @@ class ANIMATIONIMPORTER_OT_load_action(Operator):
 		if imported_action.name in {'Armature', 'default', 'Take 001'}:
 			imported_action.name = filename_stem
 
+		_sanitize_action_for_same_rig(imported_action)
 		imported_action.use_fake_user = True
 		_assign_action_to_rig(rig_object, imported_action)
 
